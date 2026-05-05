@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
+import Constants from 'expo-constants';
 import { Rect, Svg, Text as SvgText } from 'react-native-svg';
 
 type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH';
@@ -40,7 +41,7 @@ type FrameSize = {
 const STREAM_INTERVAL_MS = 125;
 const RECONNECT_BASE_DELAY_MS = 800;
 const RECONNECT_MAX_DELAY_MS = 6000;
-const DEFAULT_SERVER_HOST = Platform.OS === 'web' ? 'localhost' : '172.20.10.2';
+const DEFAULT_SERVER_HOST = resolveServerHost();
 const WS_URL = `ws://${DEFAULT_SERVER_HOST}:8000/ws/analyze`;
 
 const riskColor: Record<RiskLevel, string> = {
@@ -48,6 +49,24 @@ const riskColor: Record<RiskLevel, string> = {
   MEDIUM: '#f59e0b',
   HIGH: '#dc2626',
 };
+
+function resolveServerHost() {
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    return window.location.hostname || 'localhost';
+  }
+
+  const expoConstants = Constants as typeof Constants & {
+    expoConfig?: { hostUri?: string };
+    manifest?: { debuggerHost?: string };
+    manifest2?: { extra?: { expoGo?: { debuggerHost?: string; packagerOpts?: { dev?: boolean } } } };
+  };
+  const hostUri =
+    expoConstants.expoConfig?.hostUri ??
+    expoConstants.manifest?.debuggerHost ??
+    expoConstants.manifest2?.extra?.expoGo?.debuggerHost;
+
+  return hostUri?.split(':')[0] || 'localhost';
+}
 
 export default function App() {
   const [facing, setFacing] = useState<CameraType>('back');
@@ -266,7 +285,10 @@ export default function App() {
       <View style={styles.controls}>
         <View style={styles.statusRow}>
           <View style={[styles.statusDot, isConnected ? styles.connectedDot : styles.disconnectedDot]} />
-          <Text style={styles.statusText}>{status}</Text>
+          <View style={styles.statusCopy}>
+            <Text style={styles.statusText}>{status}</Text>
+            <Text style={styles.endpointText}>{WS_URL}</Text>
+          </View>
         </View>
 
         <View style={styles.buttonRow}>
@@ -380,10 +402,18 @@ const styles = StyleSheet.create({
     backgroundColor: '#dc2626',
   },
   statusText: {
-    flex: 1,
     color: '#111827',
     fontSize: 15,
     fontWeight: '600',
+  },
+  statusCopy: {
+    flex: 1,
+  },
+  endpointText: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 2,
   },
   buttonRow: {
     flexDirection: 'row',
