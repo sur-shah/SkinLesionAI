@@ -41,8 +41,9 @@ type FrameSize = {
 const STREAM_INTERVAL_MS = 125;
 const RECONNECT_BASE_DELAY_MS = 800;
 const RECONNECT_MAX_DELAY_MS = 6000;
+const BACKEND_PORT = 8010;
 const DEFAULT_SERVER_HOST = resolveServerHost();
-const WS_URL = `ws://${DEFAULT_SERVER_HOST}:8000/ws/analyze`;
+const WS_URL = `ws://${DEFAULT_SERVER_HOST}:${BACKEND_PORT}/ws/analyze`;
 
 const riskColor: Record<RiskLevel, string> = {
   LOW: '#26a269',

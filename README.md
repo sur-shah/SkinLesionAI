@@ -30,13 +30,13 @@ SkinLesionAI-frontend/
 ```bash
 cd /Users/surshah/Desktop/SkinLesionAI
 source venv/bin/activate
-uvicorn backend.main:app --host 0.0.0.0 --port 8000
+uvicorn backend.main:app --host 0.0.0.0 --port 8010
 ```
 
 Health check:
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:8010/health
 ```
 
 The backend loads the YOLOv8 detector at startup. If `models/skin_lesion_mobilenet.pt` is present, it also loads the fine-tuned MobileNet classifier weights. Without that checkpoint, the API still returns ranked seven-condition predictions with `source: fallback_mobile_classifier` and reports `mobilenet_loaded: false` in diagnostics.
@@ -49,7 +49,7 @@ npm install
 npm run web
 ```
 
-For mobile devices, update `DEFAULT_SERVER_HOST` in `SkinLesionAI-frontend/App.tsx` to the LAN IP address of the machine running FastAPI, then start Expo:
+For mobile devices, keep the phone and laptop on the same Wi-Fi. The app derives the backend host from Expo's dev server and connects to port `8010`.
 
 ```bash
 npm start
@@ -58,7 +58,7 @@ npm start
 The app connects to:
 
 ```text
-ws://<server-host>:8000/ws/analyze
+ws://<server-host>:8010/ws/analyze
 ```
 
 ## Verification
