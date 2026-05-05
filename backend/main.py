@@ -122,6 +122,9 @@ class MobileNetLesionClassifier:
             self.is_loaded = True
 
     def classify(self, frame: np.ndarray, detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not detections:
+            return []
+
         crops = self._crop_detections(frame, detections)
         if self.is_loaded and crops:
             return self._classify_with_mobilenet(crops)
@@ -215,7 +218,7 @@ class SkinLesionAnalyzer:
             for box in boxes:
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                 confidence = float(box.conf[0].cpu().numpy())
-                if confidence < 0.25:
+                if confidence < 0.35:
                     continue
                 detections.append(
                     {

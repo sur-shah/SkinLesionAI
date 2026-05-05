@@ -45,7 +45,7 @@ type OverlayBox = Detection & {
   displayHeight: number;
 };
 
-const STREAM_INTERVAL_MS = 125;
+const STREAM_INTERVAL_MS = 250;
 const RECONNECT_BASE_DELAY_MS = 800;
 const RECONNECT_MAX_DELAY_MS = 6000;
 const BACKEND_PORT = 8010;
@@ -188,8 +188,8 @@ export default function App() {
     try {
       const photo = await cameraRef.current.takePictureAsync({
         base64: true,
-        quality: 0.35,
-        skipProcessing: true,
+        quality: 0.85,
+        skipProcessing: false,
       });
 
       const encodedFrame = photo.base64?.replace(/^data:image\/\w+;base64,/, '').replace(/\s/g, '');
@@ -355,7 +355,10 @@ export default function App() {
             <Metric label="FPS" value={diagnostics?.processed_fps?.toFixed(1) ?? '0.0'} />
             <Metric label="Latency" value={`${diagnostics?.inference_ms?.toFixed(0) ?? '0'} ms`} />
             <Metric label="Clients" value={`${diagnostics?.active_connections ?? 0}`} />
-            <Metric label="Model" value={diagnostics?.mobilenet_loaded ? 'MobileNet' : 'Fallback'} />
+            <Metric
+              label="Model"
+              value={detections.length === 0 ? 'Detecting' : diagnostics?.mobilenet_loaded ? 'MobileNet' : 'Fallback'}
+            />
           </View>
           <Text style={styles.disclaimer}>Not a medical diagnosis. Consult a dermatologist for clinical guidance.</Text>
         </ScrollView>
