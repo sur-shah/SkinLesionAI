@@ -30,7 +30,10 @@ build/
 .coverage
 htmlcov/
 
-# Model weights (too large for git — download separately)
+# Claude Code internal
+.claude/
+
+# Model weights
 models/*.pt
 models/*.pth
 
