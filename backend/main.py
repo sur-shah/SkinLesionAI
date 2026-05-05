@@ -1,5 +1,8 @@
 import asyncio
 import base64
+import binascii
+import json
+import re
 import threading
 import time
 from collections import deque
@@ -229,9 +232,27 @@ class SkinLesionAnalyzer:
 
 
 def decode_frame(payload: str) -> np.ndarray:
+    payload = payload.strip()
+    if payload.startswith("{"):
+        payload_data = json.loads(payload)
+        payload = payload_data.get("image", "")
+
     if payload.startswith("data:image"):
         payload = payload.split(",", 1)[1]
-    image_bytes = base64.b64decode(payload)
+
+    payload = re.sub(r"\s+", "", payload)
+    if not payload:
+        raise ValueError("Empty image frame")
+
+    padding = (-len(payload)) % 4
+    if padding:
+        payload += "=" * padding
+
+    try:
+        image_bytes = base64.b64decode(payload, validate=True)
+    except binascii.Error as error:
+        raise ValueError(f"Invalid base64 image frame: {error}") from error
+
     image_array = np.frombuffer(image_bytes, dtype=np.uint8)
     frame = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
     if frame is None:

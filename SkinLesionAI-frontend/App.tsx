@@ -183,12 +183,13 @@ export default function App() {
         skipProcessing: true,
       });
 
-      if (photo.base64) {
+      const encodedFrame = photo.base64?.replace(/^data:image\/\w+;base64,/, '').replace(/\s/g, '');
+      if (encodedFrame) {
         setFrameSize({
           width: photo.width || 1,
           height: photo.height || 1,
         });
-        socket.send(`data:image/jpeg;base64,${photo.base64}`);
+        socket.send(JSON.stringify({ image: encodedFrame }));
       }
     } catch {
       setStatus('Frame capture failed. Streaming will continue.');
