@@ -1,276 +1,483 @@
-import React, { useRef, useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
-import { Svg, Rect, Text as SvgText } from 'react-native-svg';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
+import { Rect, Svg, Text as SvgText } from 'react-native-svg';
 
+type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH';
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  message: {
-    textAlign: 'center',
-    paddingBottom: 10,
-    fontSize: 16,
-  },
-  button: {
-    backgroundColor: '#2196F3',
-    padding: 15,
-    borderRadius: 5,
-    marginTop: 10,
-  },
-  buttonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  flipButton: {
-    backgroundColor: '#4CAF50',
-    padding: 10,
-    borderRadius: 5,
-  },
-  flipText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  cameraToggleButton: {
-    backgroundColor: '#FF6B6B',
-    padding: 12,
-    borderRadius: 5,
-    marginBottom: 10,
-  },
-  cameraToggleText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  // Add the new styles
-  analysisPanel: {
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-    padding: 15,
-    borderRadius: 10,
-    marginTop: 10,
-    minWidth: 250,
-  },
-  panelTitle: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  predictionText: {
-    color: 'white',
-    fontSize: 12,
-    marginBottom: 4,
-    textAlign: 'center',
-  },
-});
+type Detection = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  confidence: number;
+  label: string;
+  risk: RiskLevel;
+};
 
+type Prediction = {
+  name: string;
+  risk: RiskLevel;
+  confidence: number;
+  source: string;
+};
 
+type Diagnostics = {
+  active_connections: number;
+  frames_received: number;
+  frames_skipped: number;
+  processed_fps: number;
+  inference_ms: number;
+  mobilenet_loaded: boolean;
+  device: string;
+};
 
+type FrameSize = {
+  width: number;
+  height: number;
+};
 
+const STREAM_INTERVAL_MS = 125;
+const RECONNECT_BASE_DELAY_MS = 800;
+const RECONNECT_MAX_DELAY_MS = 6000;
+const DEFAULT_SERVER_HOST = Platform.OS === 'web' ? 'localhost' : '172.20.10.2';
+const WS_URL = `ws://${DEFAULT_SERVER_HOST}:8000/ws/analyze`;
+
+const riskColor: Record<RiskLevel, string> = {
+  LOW: '#26a269',
+  MEDIUM: '#f59e0b',
+  HIGH: '#dc2626',
+};
 
 export default function App() {
   const [facing, setFacing] = useState<CameraType>('back');
   const [permission, requestPermission] = useCameraPermissions();
-  const [isCameraOn, setIsCameraOn] = useState<boolean>(true);
-  const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
-  const [wsConnection, setWsConnection] = useState<WebSocket | null>(null);
-  const [serverResponse, setServerResponse] = useState<string>("Disconnected");
-  const [isConnected, setIsConnected] = useState<boolean>(false);
-  const [boundingBoxes, setBoundingBoxes] = useState<any[]>([]); 
-  const [currentPredictions, setCurrentPredictions] = useState<any[]>([]);
-
+  const [isCameraOn, setIsCameraOn] = useState(true);
+  const [isConnected, setIsConnected] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(true);
+  const [status, setStatus] = useState('Connecting to analyzer...');
+  const [detections, setDetections] = useState<Detection[]>([]);
+  const [predictions, setPredictions] = useState<Prediction[]>([]);
+  const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
+  const [frameSize, setFrameSize] = useState<FrameSize>({ width: 1, height: 1 });
 
   const cameraRef = useRef<CameraView | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const captureInFlightRef = useRef(false);
+  const isMountedRef = useRef(true);
 
-  // Functions
-
-  function connectToServer() {
-    try{
-      const ws = new WebSocket('ws://172.20.10.2:8000/ws/analyze');      ws.onopen = () => {
-        console.log("Connected to backend server!");
-        setIsConnected(true);
-        setWsConnection(ws);
-      };
-
-      ws.onmessage = (event) => {
-        const response = JSON.parse(event.data);
-        if (response.predictions && response.top_prediction) {
-          const top = response.top_prediction;
-          const displayText = `${top.label}: ${(top.confidence * 100).toFixed(1)}% (${top.risk} risk)`;          setServerResponse(displayText);
-          setCurrentPredictions(response.predictions);
-          
-          // Create mock bounding boxes
-          setBoundingBoxes(response.predictions);  // Use the actual detections!
-          console.log("📊 Prediction:", displayText);
-        } else {
-          setServerResponse(response.message);
-        }
-      };
-
-      ws.onclose = () => {
-        console.log('Disconnected from backend server');
-        setIsConnected(false);
-        setWsConnection(null);
-        setServerResponse("Disconnected - attempting reconnect...");
-
-        setTimeout(() => {
-          console.log('🔄 Auto-reconnecting...');
-          connectToServer();
-        }, 2000);
-
-      };
-
-      ws.onerror = (error) => {
-        console.error("WebSocket error:", error);
-        setServerResponse("Error connecting to server");
-      }
-    } catch (error) {
-      console.error("WebSocket connection failed:", error);
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
     }
-  }
-
-
-  function toggleCameraFacing() {
-    setFacing(current => (current === 'back' ? 'front' : 'back'));
-  }
-
-  function toggleCamera() {
-    setIsCameraOn(current => !current);
-  }
-
-  async function captureAndAnalyze() {
-    if(!cameraRef.current || !isCameraOn || isAnalyzing) return;
-    try {
-      setIsAnalyzing(true);
-      
-      // Capture frame from camera
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 1.0,  // Lower quality for faster processing
-        base64: true,  // Get base64 for easy transmission
-        skipProcessing: true  // Skip expensive processing
-      });
-      
-      console.log('Frame captured, size:', photo.uri);
-      
-      if(photo.base64 && wsConnection){
-        const imageData = `data:image/jpeg;base64,${photo.base64}`;
-        wsConnection.send(imageData);
-        console.log("Image sent to backend", photo.base64.length, 'characters');
-      } else {
-        console.error("No image data or connection to send to server");
-      }
-      
-      
-    } catch (error) {
-      console.error('Error capturing frame:', error);
-    } finally {
-      setIsAnalyzing(false);
-    }
-  }
-  
-  useEffect(() =>{
-    connectToServer();
   }, []);
 
-  // Real-time analysis effect
+  const scheduleReconnect = useCallback(() => {
+    clearReconnectTimer();
+    const delay = Math.min(
+      RECONNECT_BASE_DELAY_MS * 2 ** reconnectAttemptRef.current,
+      RECONNECT_MAX_DELAY_MS
+    );
+    reconnectAttemptRef.current += 1;
+    setStatus(`Disconnected. Reconnecting in ${(delay / 1000).toFixed(1)}s...`);
+    reconnectTimerRef.current = setTimeout(() => {
+      connectToServer();
+    }, delay);
+  }, [clearReconnectTimer]);
+
+  const handleServerMessage = useCallback((event: WebSocketMessageEvent) => {
+    const response = JSON.parse(event.data);
+    if (response.type === 'connection') {
+      setStatus(response.message);
+      return;
+    }
+    if (response.type === 'error') {
+      setStatus(response.message || 'Analyzer reported a recoverable error.');
+      return;
+    }
+    setDetections(response.detections ?? []);
+    setPredictions(response.predictions ?? []);
+    setDiagnostics(response.diagnostics ?? null);
+    const top = response.top_prediction as Prediction | null;
+    if (top) {
+      setStatus(`${top.name}: ${(top.confidence * 100).toFixed(1)}% (${top.risk})`);
+    } else {
+      setStatus('No lesion detected in the current frame.');
+    }
+  }, []);
+
+  const connectToServer = useCallback(() => {
+    clearReconnectTimer();
+    wsRef.current?.close();
+
+    try {
+      const socket = new WebSocket(WS_URL);
+      wsRef.current = socket;
+
+      socket.onopen = () => {
+        reconnectAttemptRef.current = 0;
+        setIsConnected(true);
+        setStatus('Connected. Starting live analysis...');
+      };
+
+      socket.onmessage = handleServerMessage;
+
+      socket.onerror = () => {
+        setStatus('Connection error. Retrying...');
+      };
+
+      socket.onclose = () => {
+        setIsConnected(false);
+        wsRef.current = null;
+        if (isMountedRef.current) {
+          scheduleReconnect();
+        }
+      };
+    } catch {
+      setIsConnected(false);
+      scheduleReconnect();
+    }
+  }, [clearReconnectTimer, handleServerMessage, scheduleReconnect]);
+
+  const sendFrame = useCallback(async () => {
+    const socket = wsRef.current;
+    if (
+      !cameraRef.current ||
+      !socket ||
+      socket.readyState !== WebSocket.OPEN ||
+      !isCameraOn ||
+      !isStreaming ||
+      captureInFlightRef.current
+    ) {
+      return;
+    }
+
+    captureInFlightRef.current = true;
+    try {
+      const photo = await cameraRef.current.takePictureAsync({
+        base64: true,
+        quality: 0.35,
+        skipProcessing: true,
+      });
+
+      if (photo.base64) {
+        setFrameSize({
+          width: photo.width || 1,
+          height: photo.height || 1,
+        });
+        socket.send(`data:image/jpeg;base64,${photo.base64}`);
+      }
+    } catch {
+      setStatus('Frame capture failed. Streaming will continue.');
+    } finally {
+      captureInFlightRef.current = false;
+    }
+  }, [isCameraOn, isStreaming]);
+
   useEffect(() => {
-    if(!isCameraOn || !wsConnection) return; // Add wsConnection check
-    const interval = setInterval(async () => {
-      await captureAndAnalyze();
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [isCameraOn, wsConnection]); // <- Add wsConnection to dependencies
+    isMountedRef.current = true;
+    connectToServer();
+    return () => {
+      isMountedRef.current = false;
+      clearReconnectTimer();
+      wsRef.current?.close();
+    };
+  }, [clearReconnectTimer, connectToServer]);
+
+  useEffect(() => {
+    const tick = async () => {
+      await sendFrame();
+      streamTimerRef.current = setTimeout(tick, STREAM_INTERVAL_MS);
+    };
+
+    streamTimerRef.current = setTimeout(tick, STREAM_INTERVAL_MS);
+    return () => {
+      if (streamTimerRef.current) {
+        clearTimeout(streamTimerRef.current);
+      }
+    };
+  }, [sendFrame]);
 
   if (!permission) {
-    // Camera permissions are still loading
-    return <View style={styles.container}><Text>Loading...</Text></View>;
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.message}>Loading camera...</Text>
+      </View>
+    );
   }
 
   if (!permission.granted) {
-    // Camera permissions are not granted yet
     return (
-      <View style={styles.container}>
-        <Text style={styles.message}>We need your permission to show the camera</Text>
-        <TouchableOpacity style={styles.button} onPress={requestPermission}>
-          <Text style={styles.buttonText}>Grant Permission</Text>
+      <View style={styles.centered}>
+        <Text style={styles.message}>Camera access is required for live lesion analysis.</Text>
+        <TouchableOpacity style={styles.primaryButton} onPress={requestPermission}>
+          <Text style={styles.buttonText}>Grant Access</Text>
         </TouchableOpacity>
       </View>
     );
   }
 
   return (
-    <View style={{ flex: 1 }}>
-      {isCameraOn ? (
-        <View style={{ flex: 2, position: 'relative' }}>
-         <CameraView ref={cameraRef} style={{ width: '100%', height: '100%' }} facing={facing} />
-          
-          {/* Bounding Box Overlays */}
-          <Svg style={StyleSheet.absoluteFillObject}>
-            {boundingBoxes.map((box, index) => (
-              <React.Fragment key={index}>
-                <Rect
-                  x={box.x}
-                  y={box.y}
-                  width={box.width}
-                  height={box.height}
-                  stroke={box.risk.toLowerCase() === 'high' ? 'red' :box.risk.toLowerCase() === 'medium' ? 'orange' : 'green'}                  strokeWidth="3"
-                  fill="transparent"
-                />
-                <SvgText
-                  x={box.x}
-                  y={box.y - 5}
-                  fill={box.risk === 'HIGH' ? 'red' : box.risk === 'MEDIUM' ? 'orange' : 'green'}
-                  fontSize="20"
-                >
-                  {box.label}: {(box.confidence * 100).toFixed(1)}%  {/* Use box.label consistently */}
-                </SvgText>
-              </React.Fragment>
-            ))}
-          </Svg>
+    <View style={styles.container}>
+      <View style={styles.cameraArea}>
+        {isCameraOn ? (
+          <>
+            <CameraView ref={cameraRef} style={styles.camera} facing={facing} />
+            <Svg
+              style={StyleSheet.absoluteFillObject}
+              viewBox={`0 0 ${frameSize.width} ${frameSize.height}`}
+              preserveAspectRatio="none"
+            >
+              {detections.map((box, index) => (
+                <React.Fragment key={`${box.x}-${box.y}-${index}`}>
+                  <Rect
+                    x={box.x}
+                    y={box.y}
+                    width={box.width}
+                    height={box.height}
+                    stroke={riskColor[box.risk] ?? riskColor.MEDIUM}
+                    strokeWidth="4"
+                    fill="transparent"
+                  />
+                  <SvgText
+                    x={box.x}
+                    y={Math.max(box.y - 8, 22)}
+                    fill={riskColor[box.risk] ?? riskColor.MEDIUM}
+                    fontSize="22"
+                    fontWeight="700"
+                  >
+                    {`${box.label} ${(box.confidence * 100).toFixed(0)}%`}
+                  </SvgText>
+                </React.Fragment>
+              ))}
+            </Svg>
+          </>
+        ) : (
+          <View style={styles.cameraOff}>
+            <Text style={styles.cameraOffText}>Camera off</Text>
+          </View>
+        )}
+      </View>
+
+      <View style={styles.controls}>
+        <View style={styles.statusRow}>
+          <View style={[styles.statusDot, isConnected ? styles.connectedDot : styles.disconnectedDot]} />
+          <Text style={styles.statusText}>{status}</Text>
         </View>
-      ) : (
-        <View style={{ flex: 2, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' }}>
-          <Text style={{ color: 'white', fontSize: 18 }}>Camera is off</Text>
+
+        <View style={styles.buttonRow}>
+          <TouchableOpacity style={styles.secondaryButton} onPress={() => setIsCameraOn((current) => !current)}>
+            <Text style={styles.buttonText}>{isCameraOn ? 'Camera Off' : 'Camera On'}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.secondaryButton} onPress={() => setFacing((current) => (current === 'back' ? 'front' : 'back'))}>
+            <Text style={styles.buttonText}>Flip</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.primaryButton} onPress={() => setIsStreaming((current) => !current)}>
+            <Text style={styles.buttonText}>{isStreaming ? 'Pause' : 'Resume'}</Text>
+          </TouchableOpacity>
         </View>
-      )}
-      
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-        <TouchableOpacity style={styles.cameraToggleButton} onPress={toggleCamera}>
-          <Text style={styles.cameraToggleText}>
-            {isCameraOn ? 'Turn Camera Off' : 'Turn Camera On'}
-          </Text>
-        </TouchableOpacity>
-        
-        <TouchableOpacity style={styles.flipButton} onPress={toggleCameraFacing}>
-          <Text style={styles.flipText}>Flip Camera</Text>
-        </TouchableOpacity>
-        
-        <Text style={{ marginTop: 20, color: isConnected ? 'green' : 'red'}}>
-          {isConnected ? 'Connected to server' : 'Disconnected from server'}
-        </Text>
-        
-        {/* Live Analysis Panel */}
-        <View style={styles.analysisPanel}>
-          <Text style={styles.panelTitle}>🤖 Live Analysis</Text>
-          {currentPredictions.map((prediction, index) => (
-            <Text key={index} style={styles.predictionText}>
-              {prediction.name}: {prediction.confidence*100}% ({prediction.risk})
-            </Text>
-          ))}
-        </View>
-        
-        <Text style={{ color: 'red', marginTop: 10 }}>
-          This is not a medical diagnosis. Consult a dermatologist.
-        </Text>
+
+        <ScrollView style={styles.panel} contentContainerStyle={styles.panelContent}>
+          <Text style={styles.panelTitle}>Condition Analysis</Text>
+          {predictions.length > 0 ? (
+            predictions.map((prediction) => (
+              <View key={prediction.name} style={styles.predictionRow}>
+                <Text style={styles.predictionName}>{prediction.name}</Text>
+                <Text style={[styles.predictionRisk, { color: riskColor[prediction.risk] }]}>
+                  {`${(prediction.confidence * 100).toFixed(1)}% ${prediction.risk}`}
+                </Text>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.emptyText}>Waiting for the first analyzed frame.</Text>
+          )}
+
+          <View style={styles.metricsGrid}>
+            <Metric label="FPS" value={diagnostics?.processed_fps?.toFixed(1) ?? '0.0'} />
+            <Metric label="Latency" value={`${diagnostics?.inference_ms?.toFixed(0) ?? '0'} ms`} />
+            <Metric label="Clients" value={`${diagnostics?.active_connections ?? 0}`} />
+            <Metric label="Model" value={diagnostics?.mobilenet_loaded ? 'MobileNet' : 'Fallback'} />
+          </View>
+          <Text style={styles.disclaimer}>Not a medical diagnosis. Consult a dermatologist for clinical guidance.</Text>
+        </ScrollView>
       </View>
     </View>
   );
 }
-// Add this right after your imports, before the App component
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.metric}>
+      <Text style={styles.metricLabel}>{label}</Text>
+      <Text style={styles.metricValue}>{value}</Text>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#111827',
+  },
+  centered: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#111827',
+    padding: 24,
+  },
+  message: {
+    color: '#f9fafb',
+    fontSize: 16,
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+  cameraArea: {
+    flex: 1.35,
+    minHeight: 360,
+    backgroundColor: '#030712',
+    position: 'relative',
+  },
+  camera: {
+    width: '100%',
+    height: '100%',
+  },
+  cameraOff: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cameraOffText: {
+    color: '#f9fafb',
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  controls: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+    paddingHorizontal: 16,
+    paddingTop: 14,
+  },
+  statusRow: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  statusDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+  connectedDot: {
+    backgroundColor: '#16a34a',
+  },
+  disconnectedDot: {
+    backgroundColor: '#dc2626',
+  },
+  statusText: {
+    flex: 1,
+    color: '#111827',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginVertical: 10,
+  },
+  primaryButton: {
+    minHeight: 44,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#2563eb',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+  },
+  secondaryButton: {
+    minHeight: 44,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#334155',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+  },
+  buttonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  panel: {
+    flex: 1,
+  },
+  panelContent: {
+    paddingBottom: 20,
+  },
+  panelTitle: {
+    color: '#111827',
+    fontSize: 17,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  predictionRow: {
+    minHeight: 36,
+    borderBottomColor: '#e5e7eb',
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  predictionName: {
+    flex: 1,
+    color: '#111827',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  predictionRisk: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  emptyText: {
+    color: '#64748b',
+    fontSize: 14,
+    paddingVertical: 10,
+  },
+  metricsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 12,
+  },
+  metric: {
+    width: '48%',
+    minHeight: 58,
+    borderRadius: 8,
+    backgroundColor: '#e2e8f0',
+    justifyContent: 'center',
+    padding: 10,
+  },
+  metricLabel: {
+    color: '#475569',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  metricValue: {
+    color: '#0f172a',
+    fontSize: 16,
+    fontWeight: '800',
+    marginTop: 2,
+  },
+  disclaimer: {
+    color: '#991b1b',
+    fontSize: 12,
+    fontWeight: '600',
+    marginTop: 12,
+  },
+});

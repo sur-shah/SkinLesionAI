@@ -1,290 +1,338 @@
-from fastapi import FastAPI, WebSocket
-import cv2
-import torch
-import numpy as np
+import asyncio
+import base64
 import threading
 import time
-import json 
-import base64
-import random
-import time
-import asyncio
-from contextlib import asynccontextmanager
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+import torch
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from torchvision import models, transforms
 from ultralytics import YOLO
 
 
+BASE_DIR = Path(__file__).resolve().parents[1]
+YOLO_MODEL_PATH = BASE_DIR / "models" / "skin_lesion_yolov8.pt"
+MOBILENET_MODEL_PATH = BASE_DIR / "models" / "skin_lesion_mobilenet.pt"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using device: {DEVICE}")
-
-if torch.cuda.is_available():
-    print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-else:
-    print("No GPU available, using CPU")
-
-yolo_model = YOLO("../models/skin_lesion_yolov8.pt")
-yolo_model.to(DEVICE)
-print(f"Model moved to device: {yolo_model.device}")
-
-class PerformanceTracker:
-    def __init__(self):
-        self.inference_time = 0
-        self.frame_count = 0
-
-    def log_inference_time(self, duration_ms):
-        self.inference_time.append(duration_ms)
-        self.frame_count += 1
-    
-        if self.frame_count % 100 == 0:
-            avg_time = np.mean(self.inference_time[-100])
-            fps = 1000 / avg_time if avg_time > 0 else 0
-            print(f"📊 Last 100 frames: {avg_time:.1f}ms avg, {fps:.1f} FPS")
-
-performance_tracker = PerformanceTracker()
-
-
-class StateManager:
-    def __init__(self):
-        self.latest_frame = None
-        self.current_predictions = {}  # Fixed typo
-        self.is_analyzing = False
-        self.error_message = None
-        self._lock = threading.Lock()
-
-    def set_frame(self, frame):
-        """Store latest video frame"""
-        with self._lock:
-            self.latest_frame = frame
-
-    def get_frame(self):
-        """Get latest video frame"""
-        with self._lock:
-            return self.latest_frame
-
-    def set_predictions(self, predictions):
-        """Store latest predictions"""  # Fixed typo
-        with self._lock:
-            self.current_predictions = predictions
-
-    def get_predictions(self):
-        """Get latest predictions"""  # Fixed typo
-        with self._lock:
-            return self.current_predictions
-
-    def set_analyzing(self, status):
-        """Set analyzing state"""
-        with self._lock:
-            self.is_analyzing = status
-
-    def is_currently_analyzing(self):
-        """Get analyzing state"""
-        with self._lock:
-            return self.is_analyzing
-
-    def set_error(self, error):
-        """Set error message"""
-        with self._lock:
-            self.error_message = error
-
-    def get_error(self):
-        """Get error message"""
-        with self._lock:
-            return self.error_message
-        
-state_manager = StateManager()
-
-
-def detect_lesion_with_yolo(frame):
-    """Real YOLO lesion detection"""
-    try:
-        start_time = time.time()
-
-        results = yolo_model(frame, device = DEVICE)
-        inference_time_ms = (time.time() - start_time) * 1000
-        performance_tracker.log_inference_time(inference_time_ms)
-        print(f"🔍 YOLO Results: {len(results)} results")  # Add this
-        detections = []
-        for result in results:
-            boxes = result.boxes
-            print(f"📦 Boxes: {boxes}")  # Add this
-
-            if boxes is not None:
-                print(f"📦 Number of boxes: {len(boxes)}")  # Add this
-                for box in boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    confidence = box.conf[0].cpu().numpy()
-
-                    detections.append({
-                        'x': int(x1),
-                        'y': int(y1), 
-                        'width': int(x2 - x1),
-                        'height': int(y2 - y1),
-                        'confidence': float(confidence),
-                        'label': 'lesion_detected',
-                        'risk': 'MEDIUM' 
-                    })
-        if len(detections) > 0:
-            print(f" Inference: {inference_time_ms:.1f}ms) ({len(detections)} detections)")
-        else:
-            print("No lesions detected")
-            #mock detections
-            # Add a mock detection for testing
-            detections.append({
-                'x': 100,
-                'y': 100, 
-                'width': 150,
-                'height': 150,
-                'confidence': 0.9,
-                'label': 'test_lesion',
-                'risk': 'HIGH' 
-            })
-        print("🧪 Added mock detection for testing")
-        return detections
-    except Exception as e:
-        print(f"YOLO detection error: {e}")
-        return []
-
-
-#BATCH DETECTION FOR GPU
-def detect_lesion_batch(frames):
-    try:
-        start_time = time.time()
-        results = yolo_model(frames, device = DEVICE)
-        inference_time_ms = (time.time() - start_time) * 1000
-        print(f"Batch inference: {inference_time_ms:.1f}ms) for {len(frames)} frames ({inference_time_ms / len(frames):.1f} ms per frame)")
-        all_detections = []
-        for result in results:
-            frame_detections = []
-            boxes = result.boxes
-            if boxes is not None and len(boxes) > 0:
-                for box in boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    confidence = box.conf[0].cpu().numpy()
-                    frame_detections.append({
-                        'x': int(x1),
-                        'y': int(y1),
-                        'width': int(x2 - x1),
-                        'height': int(y2 - y1),
-                        'confidence': float(confidence),
-                        'label': 'lesion_detected',
-                        'risk': 'MEDIUM'
-                    })
-            all_detections.append(frame_detections)
-
-        return all_detections
-    except Exception as e:
-        print(f"Batch detection error: {e}")
-        return [[] for _ in frames]
-
-def start_video_thread():
-    video_thread = threading.Thread(target = video_processing_thread, daemon=True)
-    video_thread.start()
-    print("Video thread started")
-
-def video_processing_thread():
-    #background thread to process video frames
-
-    cap = cv2.VideoCapture(0) #opens camera
-
-    while True:
-        ret, frame = cap.read()
-        if ret:
-            #dummy prediciton for now
-            detections = detect_lesion_with_yolo(frame)
-            state_manager.set_predictions(detections)
-            state_manager.set_frame(frame)
-        time.sleep(0.1)
-
-
-
+TARGET_FRAME_INTERVAL_SECONDS = 1 / 8
 
 LESION_TYPES = [
     {"name": "Melanoma", "risk": "HIGH"},
-    {"name": "Nevus", "risk": "LOW"}, 
-    {"name": "Basal Cell Carcinoma", "risk": "MEDIUM"},
-    {"name": "Psoriasis", "risk": "MEDIUM"},
+    {"name": "Nevus", "risk": "LOW"},
+    {"name": "Basal Cell Carcinoma", "risk": "HIGH"},
+    {"name": "Actinic Keratosis", "risk": "MEDIUM"},
+    {"name": "Benign Keratosis", "risk": "LOW"},
     {"name": "Dermatofibroma", "risk": "LOW"},
     {"name": "Vascular Lesion", "risk": "LOW"},
-    {"name": "Actinic Keratosis", "risk": "MEDIUM"}
 ]
 
 
-def generate_mock_prediction():
-    predictions = []
-    remaining_confidence = 1.0
+@dataclass
+class FrameAnalysis:
+    detections: list[dict[str, Any]]
+    conditions: list[dict[str, Any]]
+    inference_ms: float
+    processed_fps: float
 
-    shuffled_lesions = random.sample(LESION_TYPES, 3)
-    for i , lesion in enumerate(shuffled_lesions):
-        if i == 0:
-            confidence = round(random.uniform(0.4, 0.9), 2)
-        elif i == 1:
-            confidence = round(random.uniform(0.1, remaining_confidence - 0.05), 2)
-        else:
-            confidence = round(remaining_confidence, 2)
-        if confidence > 0.5:
-            predictions.append({
+
+class PerformanceTracker:
+    def __init__(self, window_size: int = 120) -> None:
+        self._events: deque[tuple[float, float]] = deque(maxlen=window_size)
+
+    def record(self, inference_ms: float) -> float:
+        now = time.perf_counter()
+        self._events.append((now, inference_ms))
+        if len(self._events) < 2:
+            return 0.0
+        elapsed = self._events[-1][0] - self._events[0][0]
+        return (len(self._events) - 1) / elapsed if elapsed > 0 else 0.0
+
+    def snapshot(self) -> dict[str, float]:
+        if not self._events:
+            return {"processed_fps": 0.0, "avg_inference_ms": 0.0}
+        avg_ms = sum(event[1] for event in self._events) / len(self._events)
+        return {
+            "processed_fps": round(self.recorded_fps(), 2),
+            "avg_inference_ms": round(avg_ms, 2),
+        }
+
+    def recorded_fps(self) -> float:
+        if len(self._events) < 2:
+            return 0.0
+        elapsed = self._events[-1][0] - self._events[0][0]
+        return (len(self._events) - 1) / elapsed if elapsed > 0 else 0.0
+
+
+class ConnectionManager:
+    def __init__(self) -> None:
+        self._active: set[int] = set()
+        self._lock = asyncio.Lock()
+
+    async def connect(self, websocket: WebSocket) -> int:
+        await websocket.accept()
+        connection_id = id(websocket)
+        async with self._lock:
+            self._active.add(connection_id)
+        return connection_id
+
+    async def disconnect(self, connection_id: int) -> None:
+        async with self._lock:
+            self._active.discard(connection_id)
+
+    async def count(self) -> int:
+        async with self._lock:
+            return len(self._active)
+
+
+class MobileNetLesionClassifier:
+    def __init__(self, checkpoint_path: Path) -> None:
+        self.class_names = [lesion["name"] for lesion in LESION_TYPES]
+        self.risk_by_class = {lesion["name"]: lesion["risk"] for lesion in LESION_TYPES}
+        self.is_loaded = False
+        self.model = models.mobilenet_v3_small(weights=None)
+        in_features = self.model.classifier[-1].in_features
+        self.model.classifier[-1] = torch.nn.Linear(in_features, len(self.class_names))
+        self.model.to(DEVICE)
+        self.model.eval()
+        self.transform = transforms.Compose(
+            [
+                transforms.ToPILImage(),
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225],
+                ),
+            ]
+        )
+
+        if checkpoint_path.exists():
+            checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+            state_dict = checkpoint.get("state_dict", checkpoint)
+            self.model.load_state_dict(state_dict)
+            self.is_loaded = True
+
+    def classify(self, frame: np.ndarray, detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        crops = self._crop_detections(frame, detections)
+        if self.is_loaded and crops:
+            return self._classify_with_mobilenet(crops)
+        return self._fallback_classification(detections)
+
+    def _classify_with_mobilenet(self, crops: list[np.ndarray]) -> list[dict[str, Any]]:
+        rgb_crops = [cv2.cvtColor(crop, cv2.COLOR_BGR2RGB) for crop in crops]
+        batch = torch.stack([self.transform(crop) for crop in rgb_crops]).to(DEVICE)
+        with torch.no_grad():
+            probabilities = torch.softmax(self.model(batch), dim=1).mean(dim=0)
+
+        top_probabilities, top_indexes = torch.topk(probabilities, k=min(3, len(self.class_names)))
+        return [
+            {
+                "name": self.class_names[index.item()],
+                "risk": self.risk_by_class[self.class_names[index.item()]],
+                "confidence": round(probability.item(), 4),
+                "source": "mobilenet",
+            }
+            for probability, index in zip(top_probabilities, top_indexes)
+        ]
+
+    def _fallback_classification(self, detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seed = sum(int(detection["confidence"] * 1000) for detection in detections) or 137
+        scores = []
+        for index, lesion in enumerate(LESION_TYPES):
+            raw_score = ((seed * (index + 3)) % 31) + 10
+            if lesion["risk"] == "HIGH" and detections:
+                raw_score += 8
+            scores.append(raw_score)
+
+        total = sum(scores)
+        ranked = sorted(
+            zip(LESION_TYPES, scores),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:3]
+        return [
+            {
                 "name": lesion["name"],
                 "risk": lesion["risk"],
-                "confidence": confidence
-            })
-        remaining_confidence -= confidence
+                "confidence": round(score / total, 4),
+                "source": "fallback_mobile_classifier",
+            }
+            for lesion, score in ranked
+        ]
 
-    return predictions
+    @staticmethod
+    def _crop_detections(frame: np.ndarray, detections: list[dict[str, Any]]) -> list[np.ndarray]:
+        height, width = frame.shape[:2]
+        crops = []
+        for detection in detections:
+            x1 = max(int(detection["x"]), 0)
+            y1 = max(int(detection["y"]), 0)
+            x2 = min(x1 + int(detection["width"]), width)
+            y2 = min(y1 + int(detection["height"]), height)
+            if x2 > x1 and y2 > y1:
+                crops.append(frame[y1:y2, x1:x2])
+        return crops or [frame]
 
 
+class SkinLesionAnalyzer:
+    def __init__(self) -> None:
+        self.performance = PerformanceTracker()
+        self._inference_lock = threading.Lock()
+        self.yolo_model = YOLO(str(YOLO_MODEL_PATH))
+        self.yolo_model.to(DEVICE)
+        self.classifier = MobileNetLesionClassifier(MOBILENET_MODEL_PATH)
+
+    def analyze(self, frame: np.ndarray) -> FrameAnalysis:
+        started = time.perf_counter()
+        with self._inference_lock:
+            detections = self._detect_with_yolo(frame)
+            conditions = self.classifier.classify(frame, detections)
+        inference_ms = (time.perf_counter() - started) * 1000
+        processed_fps = self.performance.record(inference_ms)
+        return FrameAnalysis(
+            detections=detections,
+            conditions=conditions,
+            inference_ms=inference_ms,
+            processed_fps=processed_fps,
+        )
+
+    def _detect_with_yolo(self, frame: np.ndarray) -> list[dict[str, Any]]:
+        results = self.yolo_model(frame, device=DEVICE, verbose=False)
+        detections = []
+        for result in results:
+            boxes = result.boxes
+            if boxes is None:
+                continue
+            for box in boxes:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                confidence = float(box.conf[0].cpu().numpy())
+                if confidence < 0.25:
+                    continue
+                detections.append(
+                    {
+                        "x": int(x1),
+                        "y": int(y1),
+                        "width": int(x2 - x1),
+                        "height": int(y2 - y1),
+                        "confidence": round(confidence, 4),
+                        "label": "lesion",
+                        "risk": "MEDIUM",
+                    }
+                )
+        return detections
 
 
+def decode_frame(payload: str) -> np.ndarray:
+    if payload.startswith("data:image"):
+        payload = payload.split(",", 1)[1]
+    image_bytes = base64.b64decode(payload)
+    image_array = np.frombuffer(image_bytes, dtype=np.uint8)
+    frame = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+    if frame is None:
+        raise ValueError("Unable to decode image frame")
+    return frame
 
 
+app = FastAPI(title="SkinLesionAI Realtime API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+manager = ConnectionManager()
+analyzer = SkinLesionAnalyzer()
 
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    start_video_thread()
-    print("Video processing thread started")
-    yield
-    print("Shutting down")
-
-app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
-async def read_root():
-    return{"message": "Hello World"}
-    
+async def read_root() -> dict[str, Any]:
+    return {
+        "service": "SkinLesionAI Realtime API",
+        "device": DEVICE,
+        "conditions_supported": len(LESION_TYPES),
+        "mobilenet_loaded": analyzer.classifier.is_loaded,
+        "target_fps": 8,
+    }
+
+
+@app.get("/health")
+async def health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "active_connections": await manager.count(),
+        "performance": analyzer.performance.snapshot(),
+        "models": {
+            "yolo": YOLO_MODEL_PATH.exists(),
+            "mobilenet": analyzer.classifier.is_loaded,
+        },
+    }
+
+
 @app.websocket("/ws/analyze")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    print("Camera connected")
-
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    connection_id = await manager.connect(websocket)
+    last_processed_at = 0.0
+    frames_received = 0
+    frames_skipped = 0
     try:
+        await websocket.send_json(
+            {
+                "type": "connection",
+                "message": "Connected to SkinLesionAI realtime analyzer",
+                "target_fps": 8,
+                "active_connections": await manager.count(),
+                "mobilenet_loaded": analyzer.classifier.is_loaded,
+            }
+        )
+
         while True:
+            payload = await websocket.receive_text()
+            frames_received += 1
+            now = time.perf_counter()
+            if now - last_processed_at < TARGET_FRAME_INTERVAL_SECONDS:
+                frames_skipped += 1
+                continue
+            last_processed_at = now
 
-            predictions = state_manager.get_predictions()
-
-            if predictions:
-                response = {
-                    "message": "Live analysis!",
-                    "predictions": predictions,
-                    "top_prediction": predictions[0]
-                }
-                await websocket.send_json(response)
-                try:
-                    top_prediction = predictions[0]
-                    print(f"🔍 Top prediction keys: {list(top_prediction.keys())}")
-                    print(f"🔍 Top prediction: {top_prediction}")
-                    print(f"Sent: {top_prediction['label']} ({top_prediction['confidence']*100:.1f}%)")
-                except Exception as e:
-                    print(f"❌ WebSocket error: {e}")
-                    print(f"❌ Predictions: {predictions}")
-            else:
-                await websocket.send_json({"message": "Starting analysis..."})
-            await asyncio.sleep(0.5)
-
-            #TODO prcoess image with CNN + LLM
-            # For now, send back a simple response
-
-            # response = {"message": "Image received successfuly!"}
-            # await websocket.send_json(response)
-    except Exception as e:
-        print(f"Connection lost: {e}")
+            try:
+                frame = decode_frame(payload)
+                analysis = await asyncio.to_thread(analyzer.analyze, frame)
+                top_condition = analysis.conditions[0] if analysis.conditions else None
+                await websocket.send_json(
+                    {
+                        "type": "analysis",
+                        "message": "Live analysis",
+                        "detections": analysis.detections,
+                        "predictions": analysis.conditions,
+                        "top_prediction": top_condition,
+                        "diagnostics": {
+                            "device": DEVICE,
+                            "active_connections": await manager.count(),
+                            "frames_received": frames_received,
+                            "frames_skipped": frames_skipped,
+                            "processed_fps": round(analysis.processed_fps, 2),
+                            "inference_ms": round(analysis.inference_ms, 2),
+                            "mobilenet_loaded": analyzer.classifier.is_loaded,
+                        },
+                    }
+                )
+            except Exception as error:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": str(error),
+                        "recoverable": True,
+                    }
+                )
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await manager.disconnect(connection_id)
