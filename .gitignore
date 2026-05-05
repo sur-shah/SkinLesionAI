@@ -30,3 +30,7 @@ build/
 .coverage
 htmlcov/
 
+# Model weights (too large for git — download separately)
+models/*.pt
+models/*.pth
+
