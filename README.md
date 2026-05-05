@@ -171,6 +171,8 @@ The app auto-detects the backend host from Expo's dev server and connects to por
 
 Auto-reconnect is built in with exponential backoff (800ms → 6s) so the stream recovers from network interruptions without user interaction.
 
+<img width="3010" height="542" alt="image" src="https://github.com/user-attachments/assets/8fbd877e-c2cf-4b6e-b5da-9b16ae5fb7f7" />
+
 ---
 
 ## API Reference
