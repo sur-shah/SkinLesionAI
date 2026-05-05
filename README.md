@@ -177,7 +177,7 @@ Auto-reconnect is built in with exponential backoff (800ms → 6s) so the stream
 
 ## Development
 
-Built with [Claude Code](https://claude.ai/code) and [Cursor](https://cursor.sh) as AI coding assistants throughout development.
+Built with help from [Claude Code](https://claude.ai/code) and [Cursor](https://cursor.sh) as AI coding assistants throughout development.
 
 ---
 
