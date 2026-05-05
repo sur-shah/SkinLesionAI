@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { LayoutChangeEvent, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import Constants from 'expo-constants';
 import { Rect, Svg, Text as SvgText } from 'react-native-svg';
@@ -36,6 +36,13 @@ type Diagnostics = {
 type FrameSize = {
   width: number;
   height: number;
+};
+
+type OverlayBox = Detection & {
+  displayX: number;
+  displayY: number;
+  displayWidth: number;
+  displayHeight: number;
 };
 
 const STREAM_INTERVAL_MS = 125;
@@ -80,6 +87,7 @@ export default function App() {
   const [predictions, setPredictions] = useState<Prediction[]>([]);
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
   const [frameSize, setFrameSize] = useState<FrameSize>({ width: 1, height: 1 });
+  const [previewSize, setPreviewSize] = useState<FrameSize>({ width: 1, height: 1 });
 
   const cameraRef = useRef<CameraView | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -199,6 +207,30 @@ export default function App() {
     }
   }, [isCameraOn, isStreaming]);
 
+  const handleCameraLayout = useCallback((event: LayoutChangeEvent) => {
+    const { width, height } = event.nativeEvent.layout;
+    setPreviewSize({ width: Math.max(width, 1), height: Math.max(height, 1) });
+  }, []);
+
+  const mapDetectionToPreview = useCallback(
+    (detection: Detection): OverlayBox => {
+      const scale = Math.max(previewSize.width / frameSize.width, previewSize.height / frameSize.height);
+      const renderedFrameWidth = frameSize.width * scale;
+      const renderedFrameHeight = frameSize.height * scale;
+      const offsetX = (previewSize.width - renderedFrameWidth) / 2;
+      const offsetY = (previewSize.height - renderedFrameHeight) / 2;
+
+      return {
+        ...detection,
+        displayX: detection.x * scale + offsetX,
+        displayY: detection.y * scale + offsetY,
+        displayWidth: detection.width * scale,
+        displayHeight: detection.height * scale,
+      };
+    },
+    [frameSize.height, frameSize.width, previewSize.height, previewSize.width]
+  );
+
   useEffect(() => {
     isMountedRef.current = true;
     connectToServer();
@@ -244,37 +276,36 @@ export default function App() {
 
   return (
     <View style={styles.container}>
-      <View style={styles.cameraArea}>
+      <View style={styles.cameraArea} onLayout={handleCameraLayout}>
         {isCameraOn ? (
           <>
             <CameraView ref={cameraRef} style={styles.camera} facing={facing} />
-            <Svg
-              style={StyleSheet.absoluteFillObject}
-              viewBox={`0 0 ${frameSize.width} ${frameSize.height}`}
-              preserveAspectRatio="none"
-            >
-              {detections.map((box, index) => (
-                <React.Fragment key={`${box.x}-${box.y}-${index}`}>
-                  <Rect
-                    x={box.x}
-                    y={box.y}
-                    width={box.width}
-                    height={box.height}
-                    stroke={riskColor[box.risk] ?? riskColor.MEDIUM}
-                    strokeWidth="4"
-                    fill="transparent"
-                  />
-                  <SvgText
-                    x={box.x}
-                    y={Math.max(box.y - 8, 22)}
-                    fill={riskColor[box.risk] ?? riskColor.MEDIUM}
-                    fontSize="22"
-                    fontWeight="700"
-                  >
-                    {`${box.label} ${(box.confidence * 100).toFixed(0)}%`}
-                  </SvgText>
-                </React.Fragment>
-              ))}
+            <Svg style={StyleSheet.absoluteFillObject} width={previewSize.width} height={previewSize.height}>
+              {detections.map(mapDetectionToPreview).map((box, index) => {
+                const labelY = Math.max(box.displayY - 8, 22);
+                return (
+                  <React.Fragment key={`${box.x}-${box.y}-${index}`}>
+                    <Rect
+                      x={box.displayX}
+                      y={box.displayY}
+                      width={box.displayWidth}
+                      height={box.displayHeight}
+                      stroke={riskColor[box.risk] ?? riskColor.MEDIUM}
+                      strokeWidth="4"
+                      fill="transparent"
+                    />
+                    <SvgText
+                      x={Math.max(box.displayX, 6)}
+                      y={labelY}
+                      fill={riskColor[box.risk] ?? riskColor.MEDIUM}
+                      fontSize="18"
+                      fontWeight="700"
+                    >
+                      {`${box.label} ${(box.confidence * 100).toFixed(0)}%`}
+                    </SvgText>
+                  </React.Fragment>
+                );
+              })}
             </Svg>
           </>
         ) : (
